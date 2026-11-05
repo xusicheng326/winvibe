@@ -6,9 +6,12 @@ import * as crypto from 'node:crypto';
 import * as http from 'node:http';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { SessionRegistry } from './sessionRegistry.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const sessionRegistry = new SessionRegistry();
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -135,6 +138,19 @@ function startHttpServer() {
           payload.agent_name = payload.agent_name || 'Claude Code';
           decisionPayloads.set(requestId, payload);
 
+          if (payload.session_id) {
+            sessionRegistry.upsert({
+              sessionId: payload.session_id,
+              agent: payload.agent_name || 'Claude Code',
+              pid: payload.pid,
+              cwd: payload.cwd,
+              status: 'waiting',
+              source: 'hook',
+              pendingRequestId: requestId,
+            });
+            console.log(`[WinVibe] SessionRegistry (PreToolUse waiting):`, sessionRegistry.list());
+          }
+
           // 30秒超时自动降级为 'ask' (回退给终端处理)
           const timeoutMs = payload.timeout_ms || 30000;
           const timer = setTimeout(() => {
@@ -166,6 +182,49 @@ function startHttpServer() {
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send('decision-request', payload);
           }
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid JSON payload' }));
+        }
+      });
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/api/v1/session/event') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const payload = JSON.parse(body);
+          const sessionId = payload.session_id || payload.sessionId;
+          const eventName = payload.event_name || payload.hook_event_name || payload.hookEventName;
+          let status: 'running' | 'waiting' | 'completed' | 'unknown' = 'unknown';
+
+          if (eventName === 'UserPromptSubmit') {
+            status = 'running';
+          } else if (eventName === 'PreToolUse') {
+            status = 'waiting';
+          } else if (eventName === 'Stop') {
+            status = 'completed';
+          } else if (payload.status) {
+            status = payload.status;
+          }
+
+          if (sessionId) {
+            sessionRegistry.upsert({
+              sessionId,
+              agent: payload.agent || payload.agent_name || 'Claude Code',
+              pid: payload.pid,
+              cwd: payload.cwd,
+              status,
+              source: 'hook',
+              pendingRequestId: payload.request_id,
+            });
+            console.log(`[WinVibe] SessionRegistry (${eventName} -> ${status}):`, sessionRegistry.list());
+          }
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'ok' }));
         } catch {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Invalid JSON payload' }));
