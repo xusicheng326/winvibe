@@ -365,7 +365,27 @@ function resolveDecision(requestId: string, action: 'allow' | 'deny' | 'ask', se
     timestamp: Date.now(),
   });
   decisionPayloads.delete(requestId);
+
+  // 同步更新 sessionRegistry 中关联该 requestId 的会话
+  for (const s of sessionRegistry.list()) {
+    if (s.pendingRequestId === requestId) {
+      sessionRegistry.upsert({
+        sessionId: s.sessionId,
+        status: action === 'allow' ? 'running' : 'completed',
+        pendingRequestId: undefined,
+      });
+      break;
+    }
+  }
 }
+
+// 目标会话管理：当前灵动岛激活/选中的目标会话 ID
+let currentTargetSessionId: string | null = null;
+
+ipcMain.on('set-target-session', (_, sessionId: string | null) => {
+  currentTargetSessionId = sessionId;
+  console.log(`[WinVibe] 当前目标会话更新为: ${sessionId}`);
+});
 
 // IPC: 审计历史记录获取与清空
 ipcMain.handle('get-audit-history', () => {
@@ -1112,27 +1132,85 @@ function handleApproveOrConfirm(action: 'allow' | 'deny') {
 
   console.log(`[WinVibe] handleApproveOrConfirm: action=${action}`);
 
-  // 1. 优先处理挂起的高危命令决策请求 (来自 Claude Code Hook / API)
-  const keys = Array.from(pendingDecisions.keys());
-  if (keys.length > 0) {
-    const targetId = keys[0];
-    resolveDecision(targetId, action);
-    console.log(`[WinVibe] Resolved pending HTTP decision ${targetId} with ${action}`);
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('shortcut-decision', action);
+  // 1. 收集当前所有处于 waiting 状态的候选会话
+  interface WaitingCandidate {
+    id: string;
+    sessionId: string;
+    agent: string;
+    pid?: number;
+    cwd?: string;
+    status: 'waiting';
+    source: string;
+    updatedAt: number;
+    pendingRequestId?: string;
+  }
+
+  const waitingMap = new Map<string, WaitingCandidate>();
+
+  // 1.1 从 sessionRegistry 收集 waiting 状态
+  for (const s of sessionRegistry.list()) {
+    if (s.status === 'waiting') {
+      waitingMap.set(s.sessionId, {
+        id: s.sessionId,
+        sessionId: s.sessionId,
+        agent: s.agent,
+        pid: s.pid,
+        cwd: s.cwd,
+        status: 'waiting',
+        source: s.source,
+        updatedAt: s.updatedAt || 0,
+        pendingRequestId: s.pendingRequestId,
+      });
     }
-    return;
   }
 
-  // 2. 广播给前端同步消除界面卡片（如模拟审批或队列中卡片）
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('shortcut-decision', action);
+  // 1.2 从 pendingDecisions 补充仍被阻塞的 HTTP 审批请求
+  for (const [reqId, payload] of decisionPayloads.entries()) {
+    if (pendingDecisions.has(reqId)) {
+      const sessId = payload.session_id || `req-${reqId}`;
+      if (!waitingMap.has(sessId)) {
+        waitingMap.set(sessId, {
+          id: sessId,
+          sessionId: sessId,
+          agent: payload.agent_name || 'Claude Code',
+          pid: payload.pid,
+          cwd: payload.cwd,
+          status: 'waiting',
+          source: 'hook',
+          updatedAt: (payload as any).timestamp || 0,
+          pendingRequestId: reqId,
+        });
+      } else {
+        waitingMap.get(sessId)!.pendingRequestId = reqId;
+      }
+    }
   }
 
-  // 3. 处理 cmd 终端里面的会话暂停提问与交互确认（严防盲按误触守卫）
-  const waitingAgent = latestActiveAgents.find(a => a.status === 'waiting');
-  if (!waitingAgent) {
-    console.log('[WinVibe] 安全守卫已生效：当前没有处于 waiting 状态的 Agent 会话，拒绝盲发键盘按键以保护终端。');
+  // 1.3 补充 latestActiveAgents 中（如未接入 Hook 的 Antigravity / OpenCode 等日志提问）
+  for (const a of latestActiveAgents) {
+    if (a.status === 'waiting') {
+      const sId = a.sessionId || a.id;
+      if (!waitingMap.has(sId)) {
+        waitingMap.set(sId, {
+          id: a.id,
+          sessionId: sId,
+          agent: a.name,
+          pid: a.pid,
+          cwd: a.cwd,
+          status: 'waiting',
+          source: a.source || 'log',
+          updatedAt: a.startTime || 0,
+          pendingRequestId: (a as any).pendingRequestId,
+        });
+      }
+    }
+  }
+
+  const allWaiting = Array.from(waitingMap.values());
+
+  // 需求 5: 若没有 waiting 会话,快捷键不做任何事。禁止回退到 latestActiveAgents[0]！
+  if (allWaiting.length === 0) {
+    console.log('[WinVibe] 安全防护：当前无任何 waiting 会话，快捷键静默忽略（无副作用）。');
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('agent-quick-feedback', {
         action: 'deny',
@@ -1144,20 +1222,74 @@ function handleApproveOrConfirm(action: 'allow' | 'deny') {
     return;
   }
 
-  const targetPid = waitingAgent.pid || 0;
-  const agentName = waitingAgent.name || '活动终端';
-  const helperExe = getHelperExePath();
+  // 需求 1: 确定当前目标会话
+  // 灵动岛中被选中或展开的卡片 = 目标；若没有选中，取 waiting 状态中 updatedAt 最早的一个 (先到先处理)
+  let targetSession: WaitingCandidate | undefined;
+  if (currentTargetSessionId) {
+    targetSession = allWaiting.find(s => s.id === currentTargetSessionId || s.sessionId === currentTargetSessionId || s.pendingRequestId === currentTargetSessionId);
+  }
 
-  console.log(`[WinVibe] 调用 WinVibeHelper 发送快捷响应 ${action} 到 PID ${targetPid} (${agentName})`);
+  if (!targetSession) {
+    // 默认取 waiting 状态中 updatedAt 最早的一个 (升序排序, 先到先处理 FIFO)
+    allWaiting.sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0));
+    targetSession = allWaiting[0];
+  }
+
+  const dirName = targetSession.cwd ? path.basename(targetSession.cwd) : '';
+  const displayName = dirName ? `${targetSession.agent} (${dirName})` : targetSession.agent;
+  console.log(`[WinVibe] 命中当前目标会话: [${displayName}] (id: ${targetSession.sessionId}, source: ${targetSession.source}, pid: ${targetSession.pid})`);
+
+  // 需求 3: 对来自 hook 的 waiting 会话，Alt+Y/N 直接用 pendingRequestId 回复对应的阻塞 HTTP 请求，不再走按键注入！
+  let hookReqId = targetSession.pendingRequestId;
+  if (!hookReqId && targetSession.source === 'hook') {
+    // 按 session_id / pid 在 pendingDecisions 中匹配
+    for (const [id, payload] of decisionPayloads.entries()) {
+      if (pendingDecisions.has(id)) {
+        if (payload.session_id === targetSession.sessionId || (targetSession.pid && payload.pid === targetSession.pid)) {
+          hookReqId = id;
+          break;
+        }
+      }
+    }
+  }
+
+  if (hookReqId && pendingDecisions.has(hookReqId)) {
+    console.log(`[WinVibe] [Hook专用回复] 目标会话具备 Hook 通道，直接回复 HTTP 请求: reqId=${hookReqId}, action=${action}`);
+    resolveDecision(hookReqId, action);
+
+    // 同步通知前端消除当前对应卡片
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('shortcut-decision', action, hookReqId);
+      mainWindow.webContents.send('agent-quick-feedback', {
+        action,
+        agentName: displayName,
+        key: action === 'allow' ? '允许 (Hook)' : '拒绝 (Hook)',
+        message: `已批准 ${displayName} 的操作请求`
+      });
+    }
+    return; // 坚决不执行任何按键注入！
+  }
+
+  // 需求 4: 仅当目标会话没有 hook 通道时,才走原有 WinVibeHelper 注入,并且必须使用该会话自己的 pid
+  const targetPid = targetSession.pid;
+  if (!targetPid || targetPid <= 0) {
+    console.warn(`[WinVibe] 目标非 Hook 会话 [${displayName}] 缺乏有效的 PID，安全拦截，不注入按键。`);
+    return;
+  }
+
+  const helperExe = getHelperExePath();
+  console.log(`[WinVibe] [Helper底层按键] 目标会话无 Hook 通道，向会话专属 PID ${targetPid} (${displayName}) 发送 ${action}`);
+
   execFile(helperExe, ['send-key', action, String(targetPid)], (err, stdout) => {
     if (err) {
       console.warn('[WinVibe] WinVibeHelper 执行失败:', err.message);
     } else {
       console.log(`[WinVibe] WinVibeHelper 响应:`, stdout?.trim());
       if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('shortcut-decision', action, targetSession?.id);
         mainWindow.webContents.send('agent-quick-feedback', {
           action,
-          agentName,
+          agentName: displayName,
           key: action === 'allow' ? 'Y' : 'N'
         });
       }

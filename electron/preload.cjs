@@ -84,6 +84,9 @@ const api = {
   },
   minimizeOrClose: (action) => {
     ipcRenderer.send('window-action', action);
+  },
+  setTargetSession: (sessionId) => {
+    ipcRenderer.send('set-target-session', sessionId);
   }
 };
 

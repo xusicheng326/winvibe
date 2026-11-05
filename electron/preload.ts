@@ -7,6 +7,7 @@ export interface WinVibeAPI {
   onAgentEvent: (callback: (event: any) => void) => () => void;
   focusWindow: (pid: number) => void;
   minimizeOrClose: (action: 'hide' | 'close') => void;
+  setTargetSession?: (sessionId: string | null) => void;
 }
 
 const api: WinVibeAPI = {
@@ -35,6 +36,9 @@ const api: WinVibeAPI = {
   },
   minimizeOrClose: (action: 'hide' | 'close') => {
     ipcRenderer.send('window-action', action);
+  },
+  setTargetSession: (sessionId: string | null) => {
+    ipcRenderer.send('set-target-session', sessionId);
   }
 };
 

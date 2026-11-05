@@ -19,6 +19,7 @@ export interface QuestionOption {
 
 export interface DecisionRequest {
   request_id: string;
+  session_id?: string;
   agent_name: string;
   tool_name: string;
   command?: string;
@@ -57,6 +58,7 @@ export interface WinVibeAPI {
   getActivePlan: () => Promise<ActivePlan | null>;
   focusWindow: (pid: number) => void;
   minimizeOrClose: (action: 'hide' | 'close') => void;
+  setTargetSession?: (sessionId: string | null) => void;
 }
 
 declare global {

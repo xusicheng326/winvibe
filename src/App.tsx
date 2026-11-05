@@ -35,6 +35,12 @@ interface AgentSession {
   source?: 'hook' | 'log' | 'process';
 }
 
+function getDirName(cwd?: string) {
+  if (!cwd) return '';
+  const parts = cwd.replace(/\\/g, '/').split('/').filter(Boolean);
+  return parts[parts.length - 1] || cwd;
+}
+
 export default function App() {
   const [isHovered, setIsHovered] = useState(false);
   const [isManuallyExpanded, setIsManuallyExpanded] = useState(false);
@@ -44,11 +50,21 @@ export default function App() {
   const [isMuted, setIsMuted] = useState(soundManager.isMuted());
   const [quickFeedback, setQuickFeedback] = useState<{ msg: string; action: 'allow' | 'deny' } | null>(null);
   const [decisionQueue, setDecisionQueue] = useState<DecisionRequest[]>([]);
+  const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null);
   const [agents, setAgents] = useState<AgentSession[]>([]);
   const [auditList, setAuditList] = useState<AuditRecord[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const currentDecision = decisionQueue[0] || null;
+  // 当前目标决策：若用户手动选中则为选中项，否则默认取队列首项 (最早到达的先到先处理)
+  const currentDecision = (selectedRequestId ? decisionQueue.find(r => r.request_id === selectedRequestId) : null) || decisionQueue[0] || null;
+
+  useEffect(() => {
+    if (currentDecision) {
+      window.winvibe?.setTargetSession?.(currentDecision.request_id);
+    } else {
+      window.winvibe?.setTargetSession?.(null);
+    }
+  }, [currentDecision?.request_id]);
 
   const fetchActivePlan = () => {
     window.winvibe?.getActivePlan?.().then((plan) => {
@@ -165,15 +181,20 @@ export default function App() {
     });
 
     // 监听全局快捷键直接处理当前决策 (Alt+Y 允许 / Alt+N 拒绝)
-    const unbindShortcut = window.winvibe.onShortcutDecision?.((action: 'allow' | 'deny') => {
+    const unbindShortcut = window.winvibe.onShortcutDecision?.((action: 'allow' | 'deny', targetId?: string) => {
+      if (action === 'allow') {
+        soundManager.playSuccess();
+      } else {
+        soundManager.playDeny();
+      }
       setDecisionQueue((prev) => {
         if (prev.length === 0) return prev;
-        const target = prev[0];
-        window.winvibe?.sendDecision(target.request_id, action);
-        if (prev.length <= 1 && !isHovered) {
+        const toRemoveId = targetId || (currentDecision ? currentDecision.request_id : prev[0].request_id);
+        const next = prev.filter(r => r.request_id !== toRemoveId && (r as any).session_id !== toRemoveId);
+        if (next.length === 0 && !isHovered) {
           window.winvibe?.setIgnoreMouseEvents(true, true);
         }
-        return prev.slice(1);
+        return next;
       });
     });
 
@@ -209,8 +230,9 @@ export default function App() {
     } else {
       soundManager.playDeny();
     }
-    window.winvibe?.sendDecision(currentDecision.request_id, action, selectedOption);
-    setDecisionQueue((prev) => prev.slice(1));
+    const resolvedId = currentDecision.request_id;
+    window.winvibe?.sendDecision(resolvedId, action, selectedOption);
+    setDecisionQueue((prev) => prev.filter(r => r.request_id !== resolvedId));
     if (decisionQueue.length <= 1 && !isHovered) {
       window.winvibe?.setIgnoreMouseEvents(true, true);
     }
@@ -278,8 +300,48 @@ export default function App() {
               initial={{ opacity: 0, scale: 0.96 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.96 }}
-              className="p-3.5 flex flex-col justify-between h-full"
+              className={`p-3.5 flex flex-col justify-between h-full ${
+                decisionQueue.length > 1 ? 'ring-1 ring-amber-400/40 shadow-[0_0_15px_rgba(245,158,11,0.15)] rounded-xl' : ''
+              }`}
             >
+              {/* 多 waiting 会话切换导航栏 (带目录名与当前目标高亮，让用户清楚知道在批准哪个) */}
+              {decisionQueue.length > 1 && (
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-1.5 mb-1.5 border-b border-white/10">
+                  <span className="text-[10px] text-amber-300 font-mono flex items-center gap-1 flex-shrink-0 font-medium">
+                    <Layers className="w-3 h-3 text-amber-400" />
+                    多会话等待中:
+                  </span>
+                  {decisionQueue.map((item) => {
+                    const isTarget = item.request_id === currentDecision.request_id;
+                    const dir = getDirName(item.cwd);
+                    return (
+                      <button
+                        key={item.request_id}
+                        onClick={() => {
+                          setSelectedRequestId(item.request_id);
+                          window.winvibe?.setTargetSession?.(item.request_id);
+                        }}
+                        className={`px-2 py-0.5 rounded text-[10px] font-mono transition flex items-center gap-1 cursor-pointer flex-shrink-0 ${
+                          isTarget
+                            ? 'bg-amber-500/30 text-amber-200 border border-amber-400 font-semibold shadow-[0_0_8px_rgba(245,158,11,0.3)] ring-1 ring-amber-400/50'
+                            : 'bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-zinc-200 border border-transparent'
+                        }`}
+                        title={`点击设为快捷键当前目标 (工作目录: ${item.cwd || '未知'})`}
+                      >
+                        {isTarget && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />}
+                        <span>{item.agent_name}</span>
+                        {dir && <span className="text-amber-300 font-semibold">({dir})</span>}
+                        {isTarget && (
+                          <span className="text-[8px] bg-amber-400/30 text-amber-100 px-1 py-0.2 rounded font-mono font-bold">
+                            当前目标
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2">
                   <span className="flex h-2.5 w-2.5 relative">
@@ -295,13 +357,17 @@ export default function App() {
                   }`}>
                     <ShieldAlert className="w-3.5 h-3.5" />
                     {currentDecision.agent_name}
+                    {getDirName(currentDecision.cwd) && (
+                      <span className="text-[10px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1.5 py-0.2 rounded font-semibold">
+                        📁 {getDirName(currentDecision.cwd)}
+                      </span>
+                    )}
                     <span className="text-[10px] font-normal px-1.5 py-0.2 rounded bg-white/10 text-zinc-300">
                       {currentDecision.type === 'complex_question' ? '复杂问题待输入' : currentDecision.type === 'question' ? '选择题待回答' : '权限请求审批'}
                     </span>
                     {decisionQueue.length > 1 && (
-                      <span className="text-[10px] bg-amber-500/20 text-amber-300 px-1.5 py-0.2 rounded-full font-mono flex items-center gap-0.5">
-                        <Layers className="w-2.5 h-2.5" />
-                        1/{decisionQueue.length}
+                      <span className="text-[10px] bg-amber-500/30 text-amber-200 border border-amber-400/40 px-1.5 py-0.2 rounded-full font-mono flex items-center gap-0.5 font-bold">
+                        Alt+Y 目标
                       </span>
                     )}
                   </span>
@@ -559,53 +625,87 @@ export default function App() {
                       </p>
                     </div>
                   ) : (
-                    agents.map((agent) => (
-                      <div
-                        key={agent.id}
-                        onClick={() => handleJumpToTerminal(agent.pid)}
-                        className="p-2 rounded-lg bg-white/[0.03] hover:bg-white/[0.07] border border-white/5 transition flex items-center justify-between group cursor-pointer"
-                        title="点击切回该终端窗口"
-                      >
-                        <div className="flex items-center gap-2 min-w-0">
-                          <span
-                            className={`h-2 w-2 rounded-full flex-shrink-0 ${
-                              agent.status === 'waiting'
-                                ? 'bg-amber-400 animate-pulse'
-                                : agent.status === 'completed'
-                                ? 'bg-blue-400'
-                                : agent.status === 'error'
-                                ? 'bg-red-400'
-                                : 'bg-emerald-400'
-                            }`}
-                          />
-                          <div className="min-w-0">
-                            <div className="text-xs font-medium text-zinc-200 truncate flex items-center gap-1.5">
-                              {agent.name}
-                              {agent.status === 'waiting' && (
-                                <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1 py-0.2 rounded font-mono">
-                                  等待回答
-                                </span>
-                              )}
-                              {agent.pid && (
-                                <span className="text-[9px] text-zinc-500 font-mono">
-                                  PID:{agent.pid}
-                                </span>
-                              )}
-                            </div>
-                            <div className="text-[10px] text-zinc-400 truncate">
-                              {agent.lastMessage}
+                    agents.map((agent) => {
+                      const isWaiting = agent.status === 'waiting';
+                      const isCurrentTarget = isWaiting && (
+                        currentDecision?.session_id === agent.id ||
+                        currentDecision?.pid === agent.pid ||
+                        currentDecision?.request_id?.includes(agent.id) ||
+                        (!currentDecision && agents.find(a => a.status === 'waiting')?.id === agent.id)
+                      );
+                      const dir = getDirName(agent.cwd);
+
+                      return (
+                        <div
+                          key={agent.id}
+                          onClick={() => {
+                            if (agent.pid) handleJumpToTerminal(agent.pid);
+                            if (isWaiting) {
+                              const match = decisionQueue.find(r => r.session_id === agent.id || r.pid === agent.pid);
+                              if (match) {
+                                setSelectedRequestId(match.request_id);
+                                window.winvibe?.setTargetSession?.(match.request_id);
+                              }
+                            }
+                          }}
+                          className={`p-2 rounded-lg transition flex items-center justify-between group cursor-pointer border ${
+                            isCurrentTarget
+                              ? 'bg-amber-500/15 hover:bg-amber-500/20 border-amber-400/70 shadow-[0_0_12px_rgba(245,158,11,0.25)] ring-1 ring-amber-400/40'
+                              : 'bg-white/[0.03] hover:bg-white/[0.07] border-white/5'
+                          }`}
+                          title={isCurrentTarget ? '当前快捷键目标 (点击切回终端)' : '点击切回该终端窗口'}
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span
+                              className={`h-2 w-2 rounded-full flex-shrink-0 ${
+                                agent.status === 'waiting'
+                                  ? 'bg-amber-400 animate-pulse'
+                                  : agent.status === 'completed'
+                                  ? 'bg-blue-400'
+                                  : agent.status === 'error'
+                                  ? 'bg-red-400'
+                                  : 'bg-emerald-400'
+                              }`}
+                            />
+                            <div className="min-w-0">
+                              <div className="text-xs font-medium text-zinc-200 truncate flex items-center gap-1.5">
+                                {agent.name}
+                                {isCurrentTarget && (
+                                  <span className="text-[9px] bg-amber-400/30 text-amber-100 border border-amber-400/50 px-1 py-0.2 rounded font-mono font-bold">
+                                    Alt+Y 目标
+                                  </span>
+                                )}
+                                {agent.status === 'waiting' && !isCurrentTarget && (
+                                  <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1 py-0.2 rounded font-mono">
+                                    等待中
+                                  </span>
+                                )}
+                                {dir && (
+                                  <span className="text-[9px] text-zinc-400 font-mono">
+                                    📁 {dir}
+                                  </span>
+                                )}
+                                {agent.pid && (
+                                  <span className="text-[9px] text-zinc-500 font-mono">
+                                    PID:{agent.pid}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[10px] text-zinc-400 truncate">
+                                {agent.lastMessage}
+                              </div>
                             </div>
                           </div>
+                          <div className="flex items-center gap-2 flex-shrink-0">
+                            <span className="text-[10px] text-zinc-500 flex items-center gap-1 font-mono">
+                              <Clock className="w-2.5 h-2.5" />
+                              {Math.round((Date.now() - agent.startTime) / 1000)}s
+                            </span>
+                            <ExternalLink className="w-3 h-3 text-zinc-600 group-hover:text-emerald-400 transition" />
+                          </div>
                         </div>
-                        <div className="flex items-center gap-2 flex-shrink-0">
-                          <span className="text-[10px] text-zinc-500 flex items-center gap-1 font-mono">
-                            <Clock className="w-2.5 h-2.5" />
-                            {Math.round((Date.now() - agent.startTime) / 1000)}s
-                          </span>
-                          <ExternalLink className="w-3 h-3 text-zinc-600 group-hover:text-emerald-400 transition" />
-                        </div>
-                      </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
               )}
