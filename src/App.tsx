@@ -30,6 +30,9 @@ interface AgentSession {
   lastMessage: string;
   startTime: number;
   pid?: number;
+  sessionId?: string;
+  cwd?: string;
+  source?: 'hook' | 'log' | 'process';
 }
 
 export default function App() {

@@ -11,6 +11,9 @@ import { SessionRegistry } from './sessionRegistry.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// 常量开关：是否优先使用 Registry 中的 Hook 会话状态。设为 false 可一行降级回旧版进程/日志扫描行为
+const USE_HOOK_STATE = true;
+
 const sessionRegistry = new SessionRegistry();
 
 let mainWindow: BrowserWindow | null = null;
@@ -600,6 +603,13 @@ function startAgentWatcher() {
   let isScanningProcesses = false;
   let refreshTimer: NodeJS.Timeout | null = null;
 
+  // 注册表变更时（例如收到 hook 上报），即刻触发防抖刷新同步到灵动岛
+  sessionRegistry.onChange(() => {
+    if (USE_HOOK_STATE) {
+      triggerFastRefresh();
+    }
+  });
+
   // 1. 毫秒级状态重新解析与 UI 同步函数（由文件变更或轮询触发）
   function refreshStatuses() {
     if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -698,93 +708,236 @@ function startAgentWatcher() {
     } catch {}
 
     const activeList: any[] = [];
-    const agyArray = Array.from(cachedAgyPids);
-    const opencodeArray = Array.from(cachedOpencodePids);
-    const claudeArray = Array.from(cachedClaudePids);
-    const hermesArray = Array.from(cachedHermesPids);
     const agyQuestionsToPush: any[] = [];
 
-    // 1. 挂载所有运行中的 Antigravity 实例（多实例精准会话隔离）
-    agyArray.forEach((pid, idx) => {
-      const id = `agy-${pid}`;
-      if (!agentStartTimes.has(id)) agentStartTimes.set(id, Date.now());
+    if (USE_HOOK_STATE) {
+      // ===== 新逻辑：Registry 中 source='hook' 的会话优先挂载 =====
+      const hookSessions = sessionRegistry.list().filter(s => s.source === 'hook');
 
-      // 为每个多开实例映射各自最近的会话，杜绝多实例串台
-      const session = sessions[idx] || sessions[0];
-      let instanceStatus: 'running' | 'waiting' | 'completed' = 'running';
-      let instanceMessage = '会话就绪 / 空闲中...';
-
-      if (session) {
-        const parsed = parseAntigravityTranscript(session.logFile, session.id, pid);
-        instanceStatus = parsed.status;
-        instanceMessage = parsed.message;
-        if (parsed.questionPayload) {
-          agyQuestionsToPush.push(parsed.questionPayload);
-        }
+      // 统计同类 Agent 数量，用于同类多会话名称区分
+      const agentCounts = new Map<string, number>();
+      for (const s of hookSessions) {
+        agentCounts.set(s.agent, (agentCounts.get(s.agent) || 0) + 1);
       }
 
-      activeList.push({
-        id,
-        name: agyArray.length > 1 ? `Google Antigravity (#${idx + 1})` : 'Google Antigravity',
-        status: instanceStatus,
-        lastMessage: instanceMessage,
-        pid,
-        startTime: agentStartTimes.get(id) || Date.now(),
+      const hookHandledAgents = new Set<string>();
+
+      for (const session of hookSessions) {
+        hookHandledAgents.add(session.agent);
+        const id = session.sessionId;
+        if (!agentStartTimes.has(id)) agentStartTimes.set(id, session.updatedAt || Date.now());
+
+        const isMulti = (agentCounts.get(session.agent) || 0) > 1;
+        const dirName = session.cwd ? path.basename(session.cwd) : '';
+        // 灵动岛每个会话显示为独立条目，同类多会话用 cwd 目录名区分，不再只用 (#1)(#2)
+        const displayName = isMulti
+          ? `${session.agent} (${dirName || session.sessionId.slice(-6)})`
+          : (dirName ? `${session.agent} (${dirName})` : session.agent);
+
+        let lastMessage = 'CLI 处于活动监听状态...';
+        if (session.status === 'waiting') {
+          const pending = session.pendingRequestId ? decisionPayloads.get(session.pendingRequestId) : null;
+          lastMessage = pending?.command ? `待审批: ${pending.command}` : '等待用户审批...';
+        } else if (session.status === 'running') {
+          lastMessage = '正在执行任务 / 思考中...';
+        } else if (session.status === 'completed') {
+          lastMessage = '任务已完成，等待下一条指令';
+        }
+
+        activeList.push({
+          id,
+          sessionId: session.sessionId,
+          name: displayName,
+          status: session.status,
+          lastMessage,
+          pid: session.pid,
+          cwd: session.cwd,
+          source: session.source,
+          startTime: agentStartTimes.get(id) || Date.now(),
+        });
+      }
+
+      // 没有 hook 数据的 agent 继续走旧的进程/日志逻辑兜底降级
+      // 1. Antigravity (若没有 hook 覆盖)
+      if (!hookHandledAgents.has('Google Antigravity')) {
+        const agyArray = Array.from(cachedAgyPids);
+        agyArray.forEach((pid, idx) => {
+          const id = `agy-${pid}`;
+          if (!agentStartTimes.has(id)) agentStartTimes.set(id, Date.now());
+          const session = sessions[idx] || sessions[0];
+          let instanceStatus: 'running' | 'waiting' | 'completed' = 'running';
+          let instanceMessage = '会话就绪 / 空闲中...';
+
+          if (session) {
+            const parsed = parseAntigravityTranscript(session.logFile, session.id, pid);
+            instanceStatus = parsed.status;
+            instanceMessage = parsed.message;
+            if (parsed.questionPayload) {
+              agyQuestionsToPush.push(parsed.questionPayload);
+            }
+          }
+
+          activeList.push({
+            id,
+            sessionId: id,
+            name: agyArray.length > 1 ? `Google Antigravity (#${idx + 1})` : 'Google Antigravity',
+            status: instanceStatus,
+            lastMessage: instanceMessage,
+            pid,
+            source: 'log',
+            startTime: agentStartTimes.get(id) || Date.now(),
+          });
+        });
+      }
+
+      // 2. OpenCode (若没有 hook 覆盖)
+      if (!hookHandledAgents.has('OpenCode')) {
+        const opencodeArray = Array.from(cachedOpencodePids);
+        opencodeArray.forEach((pid, idx) => {
+          const id = `opencode-${pid}`;
+          if (!agentStartTimes.has(id)) agentStartTimes.set(id, Date.now());
+          activeList.push({
+            id,
+            sessionId: id,
+            name: opencodeArray.length > 1 ? `OpenCode (#${idx + 1})` : 'OpenCode',
+            status: opencodeStatus,
+            lastMessage: opencodeMessage,
+            pid,
+            source: 'log',
+            startTime: agentStartTimes.get(id) || Date.now(),
+          });
+        });
+      }
+
+      // 3. Claude Code (若没有 hook 覆盖)
+      if (!hookHandledAgents.has('Claude Code')) {
+        const claudeArray = Array.from(cachedClaudePids);
+        claudeArray.forEach((pid, idx) => {
+          const id = `claude-${pid}`;
+          if (!agentStartTimes.has(id)) agentStartTimes.set(id, Date.now());
+          const pendingForThis = Array.from(decisionPayloads.values()).find(
+            d => d.agent_name === 'Claude Code' && (d.pid === pid || !d.pid)
+          );
+          const status = pendingForThis ? 'waiting' : 'running';
+          const lastMessage = pendingForThis
+            ? `待审批: ${pendingForThis.command || '高危命令'}`
+            : 'CLI 处于活动监听状态...';
+
+          activeList.push({
+            id,
+            sessionId: id,
+            name: claudeArray.length > 1 ? `Claude Code (#${idx + 1})` : 'Claude Code',
+            status,
+            lastMessage,
+            pid,
+            source: 'process',
+            startTime: agentStartTimes.get(id) || Date.now(),
+          });
+        });
+      }
+
+      // 4. Hermes Agent (若没有 hook 覆盖)
+      if (!hookHandledAgents.has('Hermes Agent')) {
+        const hermesArray = Array.from(cachedHermesPids);
+        hermesArray.forEach((pid, idx) => {
+          const id = `hermes-${pid}`;
+          if (!agentStartTimes.has(id)) agentStartTimes.set(id, Date.now());
+          activeList.push({
+            id,
+            sessionId: id,
+            name: hermesArray.length > 1 ? `Hermes Agent (#${idx + 1})` : 'Hermes Agent',
+            status: hermesStatus,
+            lastMessage: hermesMessage,
+            pid,
+            source: 'log',
+            startTime: agentStartTimes.get(id) || Date.now(),
+          });
+        });
+      }
+    } else {
+      // ===== 旧版完整降级逻辑 (USE_HOOK_STATE = false 时 100% 还原原有行为) =====
+      const agyArray = Array.from(cachedAgyPids);
+      const opencodeArray = Array.from(cachedOpencodePids);
+      const claudeArray = Array.from(cachedClaudePids);
+      const hermesArray = Array.from(cachedHermesPids);
+
+      // 1. 挂载所有运行中的 Antigravity 实例
+      agyArray.forEach((pid, idx) => {
+        const id = `agy-${pid}`;
+        if (!agentStartTimes.has(id)) agentStartTimes.set(id, Date.now());
+        const session = sessions[idx] || sessions[0];
+        let instanceStatus: 'running' | 'waiting' | 'completed' = 'running';
+        let instanceMessage = '会话就绪 / 空闲中...';
+
+        if (session) {
+          const parsed = parseAntigravityTranscript(session.logFile, session.id, pid);
+          instanceStatus = parsed.status;
+          instanceMessage = parsed.message;
+          if (parsed.questionPayload) {
+            agyQuestionsToPush.push(parsed.questionPayload);
+          }
+        }
+
+        activeList.push({
+          id,
+          name: agyArray.length > 1 ? `Google Antigravity (#${idx + 1})` : 'Google Antigravity',
+          status: instanceStatus,
+          lastMessage: instanceMessage,
+          pid,
+          startTime: agentStartTimes.get(id) || Date.now(),
+        });
       });
-    });
 
-    // 2. 挂载所有运行中的 OpenCode 实例
-    opencodeArray.forEach((pid, idx) => {
-      const id = `opencode-${pid}`;
-      if (!agentStartTimes.has(id)) agentStartTimes.set(id, Date.now());
-      activeList.push({
-        id,
-        name: opencodeArray.length > 1 ? `OpenCode (#${idx + 1})` : 'OpenCode',
-        status: opencodeStatus,
-        lastMessage: opencodeMessage,
-        pid,
-        startTime: agentStartTimes.get(id) || Date.now(),
+      // 2. 挂载所有运行中的 OpenCode 实例
+      opencodeArray.forEach((pid, idx) => {
+        const id = `opencode-${pid}`;
+        if (!agentStartTimes.has(id)) agentStartTimes.set(id, Date.now());
+        activeList.push({
+          id,
+          name: opencodeArray.length > 1 ? `OpenCode (#${idx + 1})` : 'OpenCode',
+          status: opencodeStatus,
+          lastMessage: opencodeMessage,
+          pid,
+          startTime: agentStartTimes.get(id) || Date.now(),
+        });
       });
-    });
 
-    // 3. 挂载所有运行中的 Claude Code 实例（实时感知待审批决策状态）
-    claudeArray.forEach((pid, idx) => {
-      const id = `claude-${pid}`;
-      if (!agentStartTimes.has(id)) agentStartTimes.set(id, Date.now());
+      // 3. 挂载所有运行中的 Claude Code 实例
+      claudeArray.forEach((pid, idx) => {
+        const id = `claude-${pid}`;
+        if (!agentStartTimes.has(id)) agentStartTimes.set(id, Date.now());
+        const pendingForThis = Array.from(decisionPayloads.values()).find(
+          d => d.agent_name === 'Claude Code' && (d.pid === pid || !d.pid)
+        );
+        const status = pendingForThis ? 'waiting' : 'running';
+        const lastMessage = pendingForThis
+          ? `待审批: ${pendingForThis.command || '高危命令'}`
+          : 'CLI 处于活动监听状态...';
 
-      // 检查 Claude 是否有挂起的审批决策
-      const pendingForThis = Array.from(decisionPayloads.values()).find(
-        d => d.agent_name === 'Claude Code' && (d.pid === pid || !d.pid)
-      );
-
-      const status = pendingForThis ? 'waiting' : 'running';
-      const lastMessage = pendingForThis
-        ? `待审批: ${pendingForThis.command || '高危命令'}`
-        : 'CLI 处于活动监听状态...';
-
-      activeList.push({
-        id,
-        name: claudeArray.length > 1 ? `Claude Code (#${idx + 1})` : 'Claude Code',
-        status,
-        lastMessage,
-        pid,
-        startTime: agentStartTimes.get(id) || Date.now(),
+        activeList.push({
+          id,
+          name: claudeArray.length > 1 ? `Claude Code (#${idx + 1})` : 'Claude Code',
+          status,
+          lastMessage,
+          pid,
+          startTime: agentStartTimes.get(id) || Date.now(),
+        });
       });
-    });
 
-    // 4. 挂载所有运行中的 Hermes 实例
-    hermesArray.forEach((pid, idx) => {
-      const id = `hermes-${pid}`;
-      if (!agentStartTimes.has(id)) agentStartTimes.set(id, Date.now());
-      activeList.push({
-        id,
-        name: hermesArray.length > 1 ? `Hermes Agent (#${idx + 1})` : 'Hermes Agent',
-        status: hermesStatus,
-        lastMessage: hermesMessage,
-        pid,
-        startTime: agentStartTimes.get(id) || Date.now(),
+      // 4. 挂载所有运行中的 Hermes 实例
+      hermesArray.forEach((pid, idx) => {
+        const id = `hermes-${pid}`;
+        if (!agentStartTimes.has(id)) agentStartTimes.set(id, Date.now());
+        activeList.push({
+          id,
+          name: hermesArray.length > 1 ? `Hermes Agent (#${idx + 1})` : 'Hermes Agent',
+          status: hermesStatus,
+          lastMessage: hermesMessage,
+          pid,
+          startTime: agentStartTimes.get(id) || Date.now(),
+        });
       });
-    });
+    }
 
     // 任务完成检测与 Windows 原生桌面通知
     activeList.forEach((agent) => {
@@ -876,6 +1029,16 @@ function startAgentWatcher() {
       cachedOpencodePids = nextOpencodePids;
       cachedClaudePids = nextClaudePids;
       cachedHermesPids = nextHermesPids;
+
+      if (USE_HOOK_STATE) {
+        const allAlivePids = new Set<number>([
+          ...nextAgyPids,
+          ...nextOpencodePids,
+          ...nextClaudePids,
+          ...nextHermesPids,
+        ]);
+        sessionRegistry.markDeadByPid(allAlivePids);
+      }
 
       refreshStatuses();
     });
