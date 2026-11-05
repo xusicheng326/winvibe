@@ -1,0 +1,72 @@
+{
+  "name": "winvibe-agent",
+  "version": "0.1.0",
+  "description": "Windows 桌面端专为 Claude Code 及各类 AI 编程 Agent 打造的原生悬浮灵动岛控制台",
+  "main": "dist-electron/main.js",
+  "type": "module",
+  "scripts": {
+    "start": "tsc -p tsconfig.electron.json && node -e \"import('node:fs').then(f=>{f.copyFileSync('electron/preload.cjs','dist-electron/preload.cjs');if(f.existsSync('electron/tray-icon.png'))f.copyFileSync('electron/tray-icon.png','dist-electron/tray-icon.png');})\" && node scripts/launch.js electron .",
+    "dev": "concurrently -k \"node scripts/launch.js vite\" \"wait-on tcp:5173 && npm run electron:dev\"",
+    "electron:dev": "tsc -p tsconfig.electron.json && node -e \"import('node:fs').then(f=>{f.copyFileSync('electron/preload.cjs','dist-electron/preload.cjs');if(f.existsSync('electron/tray-icon.png'))f.copyFileSync('electron/tray-icon.png','dist-electron/tray-icon.png');})\" && node scripts/launch.js electron . --dev",
+    "build": "tsc && vite build && tsc -p tsconfig.electron.json && node -e \"import('node:fs').then(f=>{f.copyFileSync('electron/preload.cjs','dist-electron/preload.cjs');if(f.existsSync('electron/tray-icon.png'))f.copyFileSync('electron/tray-icon.png','dist-electron/tray-icon.png');})\"",
+    "package": "npm run build && node scripts/launch.js npx electron-builder --win --dir",
+    "package:exe": "npm run build && node scripts/launch.js npx electron-builder --win portable",
+    "preview": "vite preview"
+  },
+  "build": {
+    "appId": "com.antigravity.winvibe",
+    "productName": "WinVibe",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "scripts",
+        "to": "scripts"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    }
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "framer-motion": "^12.4.7",
+    "lucide-react": "^0.475.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwind-merge": "^3.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.1.2",
+    "electron": "^34.2.0",
+    "electron-builder": "^26.18.0",
+    "postcss": "^8.5.2",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0",
+    "wait-on": "^8.0.2"
+  }
+}
