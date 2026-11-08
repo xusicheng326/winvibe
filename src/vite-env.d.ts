@@ -43,12 +43,15 @@ export interface ActivePlan {
 
 export interface WinVibeAPI {
   setIgnoreMouseEvents: (ignore: boolean, forward?: boolean) => void;
+  setWindowExpanded?: (expanded: boolean) => void;
+  onAutoCollapse?: (callback: () => void) => () => void;
   sendDecision: (requestId: string, action: 'allow' | 'deny' | 'ask', selectedOption?: string) => void;
   onDecisionRequest: (callback: (request: DecisionRequest) => void) => () => void;
   onAgentEvent: (callback: (event: any) => void) => () => void;
   onActiveAgentsSync: (callback: (agents: any[]) => void) => () => void;
   onDecisionResolved: (callback: (data: { requestId: string; action: string }) => void) => () => void;
   onToggleExpand: (callback: () => void) => () => void;
+  onToggleMute?: (callback: () => void) => () => void;
   onDndToggle: (callback: (isDnd: boolean) => void) => () => void;
   onShortcutDecision: (callback: (action: 'allow' | 'deny') => void) => () => void;
   onAgentQuickFeedback: (callback: (data: { action: string; agentName: string; key: string; message?: string }) => void) => () => void;
@@ -56,7 +59,10 @@ export interface WinVibeAPI {
   clearAuditHistory: () => void;
   onAuditHistoryUpdated: (callback: (records: AuditRecord[]) => void) => () => void;
   getActivePlan: () => Promise<ActivePlan | null>;
-  focusWindow: (pid: number) => void;
+  getTelemetry?: () => Promise<any>;
+  onTelemetryUpdated?: (callback: (telemetry: any) => void) => () => void;
+  focusWindow: (pid?: number, nameHint?: string, cwdHint?: string) => void;
+  abortSession?: (sessionId: string, pid?: number) => void;
   minimizeOrClose: (action: 'hide' | 'close') => void;
   setTargetSession?: (sessionId: string | null) => void;
 }

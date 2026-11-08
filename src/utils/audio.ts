@@ -1,6 +1,6 @@
 /**
- * WinVibe 8-bit 复古合成器音效管理器
- * 基于原生 Web Audio API，无需引入外部音频资源，纯代码合成经典 8-bit 音效
+ * WinVibe 8-bit & Modern 微交互音效管理器
+ * 基于原生 Web Audio API，无需引入任何外部 mp3/wav 静态资源
  */
 
 class SoundManager {
@@ -40,13 +40,37 @@ class SoundManager {
   }
 
   /**
+   * 机械键盘微动触感音效 (用于点击按钮、快捷键批准)
+   */
+  public playClick() {
+    const ctx = this.getContext();
+    if (!ctx) return;
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(1200, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(300, ctx.currentTime + 0.03);
+
+    gain.gain.setValueAtTime(0.08, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.03);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.03);
+  }
+
+  /**
    * 8-bit 任务就绪/完成提示音：上升三和弦琶音 (C5 -> E5 -> G5 -> C6)
    */
   public playSuccess() {
     const ctx = this.getContext();
     if (!ctx) return;
 
-    const notes = [523.25, 659.25, 783.99, 1046.50]; // C5, E5, G5, C6
+    const notes = [523.25, 659.25, 783.99, 1046.50];
     const startTime = ctx.currentTime;
 
     notes.forEach((freq, idx) => {
@@ -54,16 +78,16 @@ class SoundManager {
       const gain = ctx.createGain();
 
       osc.type = 'triangle';
-      osc.frequency.setValueAtTime(freq, startTime + idx * 0.08);
+      osc.frequency.setValueAtTime(freq, startTime + idx * 0.07);
 
-      gain.gain.setValueAtTime(0.12, startTime + idx * 0.08);
-      gain.gain.exponentialRampToValueAtTime(0.001, startTime + idx * 0.08 + 0.12);
+      gain.gain.setValueAtTime(0.12, startTime + idx * 0.07);
+      gain.gain.exponentialRampToValueAtTime(0.001, startTime + idx * 0.07 + 0.12);
 
       osc.connect(gain);
       gain.connect(ctx.destination);
 
-      osc.start(startTime + idx * 0.08);
-      osc.stop(startTime + idx * 0.08 + 0.12);
+      osc.start(startTime + idx * 0.07);
+      osc.stop(startTime + idx * 0.07 + 0.12);
     });
   }
 
@@ -82,42 +106,45 @@ class SoundManager {
       const gain = ctx.createGain();
 
       osc.type = 'square';
-      osc.frequency.setValueAtTime(freq, startTime + idx * 0.09);
+      osc.frequency.setValueAtTime(freq, startTime + idx * 0.08);
 
-      gain.gain.setValueAtTime(0.08, startTime + idx * 0.09);
-      gain.gain.exponentialRampToValueAtTime(0.001, startTime + idx * 0.09 + 0.14);
+      gain.gain.setValueAtTime(0.08, startTime + idx * 0.08);
+      gain.gain.exponentialRampToValueAtTime(0.001, startTime + idx * 0.08 + 0.12);
 
       osc.connect(gain);
       gain.connect(ctx.destination);
 
-      osc.start(startTime + idx * 0.09);
-      osc.stop(startTime + idx * 0.09 + 0.14);
+      osc.start(startTime + idx * 0.08);
+      osc.stop(startTime + idx * 0.08 + 0.12);
     });
   }
 
   /**
-   * 8-bit 拦截/拒绝警告音：下行沉闷低音 (Eb4 -> C4)
+   * 8-bit 拦截/拒绝/高危警告音：下行低音 (Eb4 -> C4)
    */
-  public playDeny() {
+  public playDanger() {
     const ctx = this.getContext();
     if (!ctx) return;
 
     const startTime = ctx.currentTime;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
+    const freqs = [311.13, 261.63];
 
-    osc.type = 'sawtooth';
-    osc.frequency.setValueAtTime(311.13, startTime);
-    osc.frequency.exponentialRampToValueAtTime(261.63, startTime + 0.18);
+    freqs.forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
 
-    gain.gain.setValueAtTime(0.10, startTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.18);
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(freq, startTime + idx * 0.1);
 
-    osc.connect(gain);
-    gain.connect(ctx.destination);
+      gain.gain.setValueAtTime(0.1, startTime + idx * 0.1);
+      gain.gain.exponentialRampToValueAtTime(0.001, startTime + idx * 0.1 + 0.15);
 
-    osc.start(startTime);
-    osc.stop(startTime + 0.18);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start(startTime + idx * 0.1);
+      osc.stop(startTime + idx * 0.1 + 0.15);
+    });
   }
 }
 

@@ -4,6 +4,16 @@ const api = {
   setIgnoreMouseEvents: (ignore, forward) => {
     ipcRenderer.send('set-ignore-mouse-events', ignore, forward);
   },
+  setWindowExpanded: (expanded) => {
+    ipcRenderer.send('set-window-expanded', expanded);
+  },
+  onAutoCollapse: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('auto-collapse', handler);
+    return () => {
+      ipcRenderer.removeListener('auto-collapse', handler);
+    };
+  },
   sendDecision: (requestId, action, selectedOption) => {
     ipcRenderer.send('decision-response', { requestId, action, selectedOption });
   },
@@ -42,6 +52,13 @@ const api = {
       ipcRenderer.removeListener('toggle-expand', handler);
     };
   },
+  onToggleMute: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('toggle-mute', handler);
+    return () => {
+      ipcRenderer.removeListener('toggle-mute', handler);
+    };
+  },
   onDndToggle: (callback) => {
     const handler = (_, data) => callback(data);
     ipcRenderer.on('dnd-toggle', handler);
@@ -69,6 +86,16 @@ const api = {
   getActivePlan: () => {
     return ipcRenderer.invoke('get-active-plan');
   },
+  getTelemetry: () => {
+    return ipcRenderer.invoke('get-telemetry');
+  },
+  onTelemetryUpdated: (callback) => {
+    const handler = (_, data) => callback(data);
+    ipcRenderer.on('telemetry-updated', handler);
+    return () => {
+      ipcRenderer.removeListener('telemetry-updated', handler);
+    };
+  },
   clearAuditHistory: () => {
     ipcRenderer.send('clear-audit-history');
   },
@@ -79,8 +106,11 @@ const api = {
       ipcRenderer.removeListener('audit-history-updated', handler);
     };
   },
-  focusWindow: (pid) => {
-    ipcRenderer.send('focus-window', pid);
+  focusWindow: (pid, nameHint, cwdHint) => {
+    ipcRenderer.send('focus-window', pid, nameHint, cwdHint);
+  },
+  abortSession: (sessionId, pid) => {
+    ipcRenderer.send('abort-session', { sessionId, pid });
   },
   minimizeOrClose: (action) => {
     ipcRenderer.send('window-action', action);
