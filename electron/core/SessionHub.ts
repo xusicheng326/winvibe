@@ -17,15 +17,30 @@ export class SessionHub {
   }
 
   public upsertSession(session: Partial<AgentInstance> & { id: string; name?: string }): AgentInstance {
-    // 核心会话消歧与去重：同一种 agentType 且 (未绑定 PID 或 PID 一致) 严格合并为同一会话
+    // 严格会话消歧与多终端隔离准则：
+    // 1. 如果显式给定了相同 id，直接更新
+    // 2. 任何具有不同非零 PID (如 PID 23560 vs 27636) 的终端，严格认定为独立多开窗口，绝对严禁暴力合流！
+    // 3. 拥有相同非零 PID (如 PID 8112) 的 process 与 log 会话，必为同一个终端，自动升级并清理占位 ID，杜绝会话数莫名其妙 +1
     let targetId = session.id;
-    if (session.agentType && session.agentType !== 'generic') {
-      const match = Array.from(this.sessions.values()).find(s => 
-        s.agentType === session.agentType && 
-        (!s.pid || !session.pid || s.pid === session.pid)
-      );
+
+    if (!this.sessions.has(targetId) && session.agentType && session.agentType !== 'generic') {
+      const match = Array.from(this.sessions.values()).find(s => {
+        if (s.agentType !== session.agentType) return false;
+        // 相同 PID：100% 确认属于同一终端
+        if (s.pid && session.pid && s.pid === session.pid) return true;
+        // 单方未绑定 PID：允许日志会话与进程会话进行首次关联
+        if ((!s.pid && session.pid) || (s.pid && !session.pid)) return true;
+        return false;
+      });
+
       if (match) {
-        targetId = match.id;
+        if (match.source === 'process' && session.source === 'log') {
+          // 将 process 占位会话平滑升级为真实 log 会话，彻底删除旧占位 key
+          this.sessions.delete(match.id);
+          targetId = session.id;
+        } else {
+          targetId = match.id;
+        }
       }
     }
 

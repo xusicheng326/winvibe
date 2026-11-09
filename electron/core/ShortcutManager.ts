@@ -13,9 +13,19 @@ export class ShortcutManager {
   }
 
   public register(): void {
-    // 展开/收起控制台全局快捷键 (审批全面迁移至无冲突数字单键 1/2)
+    // 展开/收起控制台全局快捷键
     globalShortcut.register('Alt+V', () => {
       this.windowManager.sendToRenderer('toggle-expand');
+    });
+
+    // 核心恢复：系统级全局审批热键 Alt+Y (批准) 与 Alt+N (拒绝)
+    // 无论当前焦点在浏览器、VS Code 还是其它任意窗口，均可全局一键响应放行
+    globalShortcut.register('Alt+Y', () => {
+      this.handleAction('allow');
+    });
+
+    globalShortcut.register('Alt+N', () => {
+      this.handleAction('deny');
     });
   }
 

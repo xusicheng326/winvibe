@@ -81,26 +81,31 @@ export class ProcessWatcher {
           const match = line.match(/^"[^"]+","(\d+)"/);
           if (match) {
             const pid = parseInt(match[1], 10);
-            // 优先与日志适配器生成的同类型会话合流，避免多源导致会话数量翻倍
-            const existingSameType = this.sessionHub.getAllSessions().find(s => s.agentType === agentType && (!s.pid || s.pid === pid));
-            if (existingSameType) {
-              // 仅补充 pid，绝对不覆盖日志适配器的高精度状态（如 error / completed / idle）
+            // 1. 检查该 PID 是否已经被某个会话持有
+            const alreadyBound = this.sessionHub.getAllSessions().find(s => s.pid === pid);
+            if (alreadyBound) {
+              continue;
+            }
+
+            // 2. 检查是否有同类型但尚未绑定 PID 的会话进行 1:1 配对
+            const unboundSession = this.sessionHub.getAllSessions().find(s => s.agentType === agentType && !s.pid);
+            if (unboundSession) {
               this.sessionHub.upsertSession({
-                id: existingSameType.id,
+                id: unboundSession.id,
                 pid,
               });
             } else {
+              // 3. 所有已有同类会话均已占用不同 PID，说明这是一个新并发启动的同类独立终端窗口！
               const sessionId = `${agentType}-${pid}`;
               const existing = this.sessionHub.getSession(sessionId);
               if (!existing) {
-                // 终端刚启动未提问时，状态应为 completed（就绪），而非 running（运行中）
                 this.sessionHub.upsertSession({
                   id: sessionId,
                   sessionId,
                   name: `${agentName} (#${pid})`,
                   agentType,
                   status: 'completed',
-                  lastMessage: '终端已启动，等待输入任务...',
+                  lastMessage: `${agentName} 终端就绪 (等待输入指令)`,
                   pid,
                   source: 'process',
                 });

@@ -11,6 +11,7 @@ export class WindowManager {
   private isHidden: boolean = false;
   private isDnd: boolean = false;
   private isExpanded: boolean = false;
+  private hasPendingDecision: boolean = false;
 
   private static readonly COLLAPSED_WIDTH = 340;
   private static readonly COLLAPSED_HEIGHT = 56;
@@ -57,6 +58,10 @@ export class WindowManager {
 
     // 工业级交互：失焦自动收起（点击其他应用或桌面立即收拢，绝不阻挡操作）
     this.window.on('blur', () => {
+      // 核心守卫：存在待审批交互决策时，严禁因失焦收起！保证命令与问题永远悬浮展现，用户无需切回终端
+      if (this.hasPendingDecision) {
+        return;
+      }
       if (this.isExpanded) {
         this.setWindowExpanded(false);
         this.sendToRenderer('auto-collapse');
@@ -89,6 +94,8 @@ export class WindowManager {
       const windowX = Math.round((screenWidth - windowWidth) / 2);
       this.window.setBounds({ x: windowX, y: 0, width: windowWidth, height: windowHeight });
       this.window.setIgnoreMouseEvents(false);
+      this.window.setAlwaysOnTop(true, 'screen-saver', 1);
+      this.window.moveTop();
       this.window.focus();
     } else {
       const windowWidth = WindowManager.COLLAPSED_WIDTH;
@@ -96,6 +103,8 @@ export class WindowManager {
       const windowX = Math.round((screenWidth - windowWidth) / 2);
       this.window.setBounds({ x: windowX, y: 0, width: windowWidth, height: windowHeight });
       this.window.setIgnoreMouseEvents(false);
+      this.window.setAlwaysOnTop(true, 'screen-saver', 1);
+      this.window.moveTop();
     }
   }
 
@@ -103,10 +112,23 @@ export class WindowManager {
     return this.window;
   }
 
+  public setHasPendingDecision(has: boolean) {
+    this.hasPendingDecision = has;
+    if (has) {
+      this.setWindowExpanded(true);
+      if (this.window && !this.window.isDestroyed()) {
+        this.window.setAlwaysOnTop(true, 'screen-saver', 1);
+        this.window.moveTop();
+      }
+    }
+  }
+
   public forceForeground(): void {
     if (!this.window || this.window.isDestroyed()) return;
     if (this.window.isMinimized()) this.window.restore();
     this.window.show();
+    this.window.setAlwaysOnTop(true, 'screen-saver', 1);
+    this.window.moveTop();
     this.window.focus();
     // 通过底层 Win32 API 彻底破除 Windows 前台焦点保护，确保首个按键 100% 瞬时命中
     Win32Bridge.focusWindow(process.pid, 'WinVibe', '');

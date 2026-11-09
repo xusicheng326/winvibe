@@ -379,6 +379,10 @@ namespace WinVibe {
             } catch {}
         }
 
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+        private const uint GA_ROOT = 2;
+
         public static IntPtr FindWindowForAgent(uint pid, string nameHint, string cwdHint) {
             IntPtr hWinsta = OpenWindowStation("winsta0", false, 0x037F);
             if (hWinsta != IntPtr.Zero) SetProcessWindowStation(hWinsta);
@@ -386,6 +390,42 @@ namespace WinVibe {
 
             string hint = !string.IsNullOrEmpty(nameHint) ? nameHint.ToLowerInvariant() : "";
             string cwd = !string.IsNullOrEmpty(cwdHint) ? cwdHint.ToLowerInvariant() : "";
+
+            // 1. 核心黄金法则: 原生控制台窗口直连 (AttachConsole -> GetConsoleWindow)
+            // 解决纯控制台进程 (如 agy.exe、opencode.exe) 本身没有独立顶层窗口的问题，直接获取真实的宿主终端窗口
+            if (pid > 0) {
+                try {
+                    FreeConsole();
+                    if (AttachConsole(pid)) {
+                        IntPtr hConsole = GetConsoleWindow();
+                        FreeConsole();
+                        if (hConsole != IntPtr.Zero && IsWindowVisible(hConsole)) {
+                            IntPtr hRoot = GetAncestor(hConsole, GA_ROOT);
+                            IntPtr targetConsoleWnd = (hRoot != IntPtr.Zero && IsWindowVisible(hRoot)) ? hRoot : hConsole;
+                            Log("Direct console window matched via AttachConsole for PID " + pid + ": HWND=" + targetConsoleWnd);
+                            return targetConsoleWnd;
+                        }
+                    }
+                } catch (Exception ex) {
+                    Log("AttachConsole probe error: " + ex.Message);
+                }
+            }
+
+            // 2. 进程树溯源：收集目标进程及其父进程、祖父进程 PID 家族
+            HashSet<uint> familyPids = new HashSet<uint>();
+            if (pid > 0) {
+                familyPids.Add(pid);
+                uint cur = pid;
+                for (int depth = 0; depth < 3; depth++) {
+                    uint p = GetParentProcessId(cur);
+                    if (p > 0 && !familyPids.Contains(p)) {
+                        familyPids.Add(p);
+                        cur = p;
+                    } else {
+                        break;
+                    }
+                }
+            }
 
             IntPtr bestWnd = IntPtr.Zero;
             int bestScore = 0;
@@ -421,14 +461,18 @@ namespace WinVibe {
 
                     int score = 0;
 
-                    // 1. 终端与代码宿主特征评分 (Windows Terminal, VSCode, Cursor, CMD, PowerShell, ConHost, mintty, WezTerm, Alacritty)
+                    // 1. 终端与代码宿主特征评分
                     bool isTerminalHost = proc.Contains("terminal") || proc.Contains("code") || proc.Contains("cursor") || proc.Contains("powershell") || proc.Contains("cmd") || proc.Contains("conhost") || proc.Contains("alacritty") || proc.Contains("wezterm") || cls.Contains("CASCADIA");
                     if (isTerminalHost) {
                         score += 30;
                     }
 
-                    // 2. PID 精确匹配
-                    if (pid > 0 && pId == pid) score += 100;
+                    // 2. PID 与进程树家族精确匹配 (最高加分 200)
+                    if (familyPids.Contains(pId)) {
+                        score += 200;
+                    } else if (pid > 0 && pId == pid) {
+                        score += 150;
+                    }
 
                     // 3. 标题与 Agent 身份特征匹配
                     if (!string.IsNullOrEmpty(hint)) {

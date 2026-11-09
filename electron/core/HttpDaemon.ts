@@ -96,6 +96,9 @@ export class HttpDaemon {
         sessions: this.sessionHub.getAllSessions().length,
         telemetry: this.telemetryService.getGlobalTelemetry(),
       }));
+    } else if (req.method === 'GET' && req.url === '/api/v1/sessions') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(this.sessionHub.getAllSessions()));
     } else {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Not found' }));

@@ -33,7 +33,7 @@ const processWatcher = new ProcessWatcher(sessionHub);
 
 // 适配器
 const agyAdapter = new AntigravityAdapter(sessionHub, telemetryService);
-const opencodeAdapter = new OpenCodeAdapter(sessionHub);
+const opencodeAdapter = new OpenCodeAdapter(sessionHub, telemetryService);
 const hermesAdapter = new HermesAdapter(sessionHub);
 const cursorAdapter = new CursorAdapter(sessionHub);
 
@@ -77,9 +77,12 @@ app.whenReady().then(async () => {
     (decisions) => {
       trayManager.updateMenu();
       if (decisions.length > 0) {
+        windowManager.setHasPendingDecision(true);
         windowManager.forceForeground();
         windowManager.sendToRenderer('decision-request', decisions[0]);
       } else {
+        windowManager.setHasPendingDecision(false);
+        windowManager.setWindowExpanded(false);
         windowManager.sendToRenderer('decision-resolved', { requestId: 'all', action: 'dismiss' });
       }
     }
